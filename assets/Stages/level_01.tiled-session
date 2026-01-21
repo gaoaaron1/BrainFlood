@@ -1,0 +1,30 @@
+{
+    "Map/SizeTest": {
+        "height": 4300,
+        "width": 2
+    },
+    "activeFile": "",
+    "expandedProjectPaths": [
+        "."
+    ],
+    "file.lastUsedOpenFilter": "All Files (*)",
+    "fileStates": {
+        "mountains3.tsx": {
+            "scaleInDock": 1,
+            "scaleInEditor": 1
+        }
+    },
+    "last.imagePath": "C:/Users/gaoaa/Desktop/BrainFlood/assets",
+    "map.height": 44,
+    "map.lastUsedFormat": "tmx",
+    "map.tileHeight": 32,
+    "map.tileWidth": 32,
+    "map.width": 24,
+    "openFiles": [
+    ],
+    "project": "level_01.tiled-project",
+    "recentFiles": [
+        "mountains3.tsx"
+    ],
+    "tileset.lastUsedFormat": "tsx"
+}
