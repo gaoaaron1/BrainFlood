@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<map version="1.10" tiledversion="1.10.2" orientation="orthogonal" renderorder="right-down" width="18" height="32" tilewidth="32" tileheight="32" infinite="0" nextlayerid="11" nextobjectid="11">
+<map version="1.10" tiledversion="1.10.2" orientation="orthogonal" renderorder="right-down" width="18" height="32" tilewidth="32" tileheight="32" infinite="0" nextlayerid="12" nextobjectid="20">
  <tileset firstgid="1" source="mountains3.tsx"/>
  <layer id="1" name="background_layer" width="18" height="32">
   <data encoding="csv">
@@ -109,6 +109,16 @@
 73,73,73,73,73,73,73,73,73,73,73,73,73,73,73,73,73,73
 </data>
  </layer>
+ <objectgroup id="11" name="vocab_blocks">
+  <object id="11" x="225.333" y="512.667" width="64" height="64"/>
+  <object id="12" x="161" y="513" width="64" height="64"/>
+  <object id="13" x="96.6667" y="513.333" width="64" height="64"/>
+  <object id="14" x="290" y="512.667" width="64" height="64"/>
+  <object id="16" x="32.6667" y="513" width="64" height="64"/>
+  <object id="17" x="353.667" y="512.667" width="64" height="64"/>
+  <object id="18" x="418" y="513" width="64" height="64"/>
+  <object id="19" x="417.333" y="577.333" width="64" height="64"/>
+ </objectgroup>
  <objectgroup id="4" name="player_spawn">
   <object id="1" x="254.826" y="289.161" width="32" height="32"/>
  </objectgroup>

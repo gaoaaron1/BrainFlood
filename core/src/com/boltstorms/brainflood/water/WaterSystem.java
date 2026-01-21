@@ -1,21 +1,26 @@
 package com.boltstorms.brainflood.water;
 
+import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
 import com.badlogic.gdx.math.MathUtils;
 import com.badlogic.gdx.math.Vector2;
-import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
 import com.boltstorms.brainflood.level.Level;
 
 import java.util.ArrayDeque;
 
 public class WaterSystem {
 
+    public interface SolidQuery {
+        boolean isSolid(int tx, int ty);
+    }
+
     private final Level level;
+    private final SolidQuery solidQuery;
 
     private final int mapW, mapH, tileW, tileH;
 
     // water state
-    private float[][] water;      // [y][x] 0..1
-    private float[][] downFlux;   // [y][x] amount moved down this frame (visual)
+    private final float[][] water;      // [y][x] 0..1
+    private final float[][] downFlux;   // [y][x] amount moved down this frame (visual)
 
     // masks
     private boolean[][] reachable;
@@ -48,20 +53,25 @@ public class WaterSystem {
     private float impactYPx;
     private boolean waterStarted = false;
 
-    public WaterSystem(Level level, int inletTx, int inletTy, int outletTx, int outletTy) {
+    public WaterSystem(Level level,
+                       int inletTx, int inletTy,
+                       int outletTx, int outletTy,
+                       SolidQuery solidQuery) {
+
         this.level = level;
         this.mapW = level.mapW();
         this.mapH = level.mapH();
         this.tileW = level.tileW();
         this.tileH = level.tileH();
+        this.solidQuery = solidQuery;
 
         this.inletTx = inletTx;
         this.inletTy = inletTy;
         this.outletTx = outletTx;
         this.outletTy = outletTy;
 
-        water = new float[mapH][mapW];
-        downFlux = new float[mapH][mapW];
+        this.water = new float[mapH][mapW];
+        this.downFlux = new float[mapH][mapW];
 
         computeOutsideMask();
         computeReachableFromInlet();
@@ -75,10 +85,37 @@ public class WaterSystem {
         waterStarted = false;
     }
 
+    // -------------------------
+    // Solid/Open helpers
+    // -------------------------
+    private boolean isSolid(int x, int y) {
+        return solidQuery != null && solidQuery.isSolid(x, y);
+    }
+
+    private boolean isOpen(int x, int y) {
+        return !isSolid(x, y);
+    }
+
+    // IMPORTANT: if a tile becomes solid (vocab block), remove any stored water there
+    private void purgeWaterInSolids() {
+        for (int y = 0; y < mapH; y++) {
+            for (int x = 0; x < mapW; x++) {
+                if (isSolid(x, y)) {
+                    water[y][x] = 0f;
+                    downFlux[y][x] = 0f;
+                }
+            }
+        }
+    }
+
+    // -------------------------
+    // Public API
+    // -------------------------
     public void onLevelChanged() {
         computeOutsideMask();
         computeReachableFromInlet();
         impactYPx = computeStreamImpactYPx();
+        purgeWaterInSolids();
     }
 
     public boolean isWaterStarted() { return waterStarted; }
@@ -94,12 +131,13 @@ public class WaterSystem {
     public boolean isInWaterRegion(int tx, int ty) {
         if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return false;
         if (reachable == null) return false;
-        return reachable[ty][tx] && !outside[ty][tx] && !level.isWall(tx, ty);
+        return reachable[ty][tx] && !outside[ty][tx] && !isSolid(tx, ty);
     }
 
     public void update(float dt) {
         waterTime += dt;
 
+        // falling inlet visual
         if (!waterStarted) {
             fallVY += fallGravityPx * dt;
             fallYPx += fallVY * dt;
@@ -110,6 +148,9 @@ public class WaterSystem {
             }
             return;
         }
+
+        // ensure no water is stored in solid tiles (vocab blocks + walls)
+        purgeWaterInSolids();
 
         // reset flux
         for (int y = 0; y < mapH; y++) {
@@ -127,13 +168,14 @@ public class WaterSystem {
         drainOutside(dt);
     }
 
+    // -------------------------
+    // Rendering
+    // -------------------------
     public void render(ShapeRenderer shapes) {
-        // 1) inlet falling ribbon
         renderInletStream(shapes);
-
         if (!waterStarted) return;
 
-        // 2) water body
+        // water body
         for (int y = 0; y < mapH; y++) {
             float tileBottom = y * tileH;
             for (int x = 0; x < mapW; x++) {
@@ -146,7 +188,7 @@ public class WaterSystem {
             }
         }
 
-        // 3) surface highlights (skip waterfall tiles)
+        // surface highlights (skip waterfall tiles)
         shapes.setColor(0.75f, 0.92f, 1.0f, 0.55f);
         for (int x = 0; x < mapW; x++) {
             for (int y = 0; y < mapH; y++) {
@@ -158,7 +200,7 @@ public class WaterSystem {
                 boolean aboveEmpty =
                         (y == mapH - 1) ||
                                 water[y + 1][x] <= 0.01f ||
-                                level.isWall(x, y + 1);
+                                isSolid(x, y + 1);
 
                 if (!aboveEmpty) continue;
 
@@ -170,7 +212,6 @@ public class WaterSystem {
             }
         }
 
-        // 4) segmented waterfall ribbons
         renderWaterfalls(shapes);
     }
 
@@ -185,7 +226,6 @@ public class WaterSystem {
         float bottomY = Math.min(syTop, syBot);
         float topY = Math.max(syTop, syBot);
         float height = topY - bottomY;
-
         if (height <= 0.5f) return;
 
         for (int i = 0; i < segs; i++) {
@@ -238,10 +278,9 @@ public class WaterSystem {
 
                 for (int i = 0; i < runSegs; i++) {
                     float a0 = i / (float) runSegs;
-                    float a1 = (i + 1) / (float) runSegs;
 
                     float y0 = MathUtils.lerp(runTop, runBottom, a0);
-                    float y1 = MathUtils.lerp(runTop, runBottom, a1);
+                    float y1 = MathUtils.lerp(runTop, runBottom, (i + 1) / (float) runSegs);
 
                     float segBottom = Math.min(y0, y1);
                     float segTop = Math.max(y0, y1);
@@ -263,9 +302,12 @@ public class WaterSystem {
         }
     }
 
+    // -------------------------
+    // Water sim
+    // -------------------------
     private void addWaterAtInlet(float dt) {
         if (inletTx < 0 || inletTx >= mapW || inletTy < 0 || inletTy >= mapH) return;
-        if (level.isWall(inletTx, inletTy)) return;
+        if (isSolid(inletTx, inletTy)) return;
         if (!reachable[inletTy][inletTx]) return;
         if (outside[inletTy][inletTx]) return;
 
@@ -275,7 +317,7 @@ public class WaterSystem {
     private void stepWater(float dt) {
         for (int y = 0; y < mapH; y++) {
             for (int x = 0; x < mapW; x++) {
-                if (level.isWall(x, y)) { water[y][x] = 0f; continue; }
+                if (isSolid(x, y)) { water[y][x] = 0f; continue; }
                 if (!reachable[y][x]) { water[y][x] = 0f; continue; }
                 if (outside[y][x]) { water[y][x] = 0f; continue; }
 
@@ -308,7 +350,7 @@ public class WaterSystem {
 
     private boolean canHoldWater(int x, int y) {
         if (x < 0 || x >= mapW || y < 0 || y >= mapH) return false;
-        if (level.isWall(x, y)) return false;
+        if (isSolid(x, y)) return false;
         if (!reachable[y][x]) return false;
         if (outside[y][x]) return false;
         return true;
@@ -339,7 +381,7 @@ public class WaterSystem {
 
         for (int y = 0; y < mapH; y++) {
             for (int x = 0; x < mapW; x++) {
-                if (level.isWall(x, y)) continue;
+                if (isSolid(x, y)) continue;
                 if (!reachable[y][x]) continue;
                 if (outside[y][x]) continue;
 
@@ -351,7 +393,7 @@ public class WaterSystem {
                     int nx = x + dx[i];
                     int ny = y + dy[i];
                     if (nx < 0 || nx >= mapW || ny < 0 || ny >= mapH) continue;
-                    if (outside[ny][nx] && !level.isWall(nx, ny)) {
+                    if (outside[ny][nx] && isOpen(nx, ny)) {
                         nearOutside = true;
                         break;
                     }
@@ -365,17 +407,21 @@ public class WaterSystem {
         }
     }
 
+    // -------------------------
+    // Masks
+    // -------------------------
     private void computeOutsideMask() {
         outside = new boolean[mapH][mapW];
         ArrayDeque<int[]> q = new ArrayDeque<>();
 
+        // seed open border tiles
         for (int x = 0; x < mapW; x++) {
-            if (level.isOpen(x, 0)) { outside[0][x] = true; q.add(new int[]{x, 0}); }
-            if (level.isOpen(x, mapH - 1)) { outside[mapH - 1][x] = true; q.add(new int[]{x, mapH - 1}); }
+            if (isOpen(x, 0)) { outside[0][x] = true; q.add(new int[]{x, 0}); }
+            if (isOpen(x, mapH - 1)) { outside[mapH - 1][x] = true; q.add(new int[]{x, mapH - 1}); }
         }
         for (int y = 0; y < mapH; y++) {
-            if (level.isOpen(0, y)) { outside[y][0] = true; q.add(new int[]{0, y}); }
-            if (level.isOpen(mapW - 1, y)) { outside[y][mapW - 1] = true; q.add(new int[]{mapW - 1, y}); }
+            if (isOpen(0, y)) { outside[y][0] = true; q.add(new int[]{0, y}); }
+            if (isOpen(mapW - 1, y)) { outside[y][mapW - 1] = true; q.add(new int[]{mapW - 1, y}); }
         }
 
         int[] dx = {1, -1, 0, 0};
@@ -389,7 +435,7 @@ public class WaterSystem {
                 int nx = cx + dx[i];
                 int ny = cy + dy[i];
                 if (nx < 0 || nx >= mapW || ny < 0 || ny >= mapH) continue;
-                if (!level.isOpen(nx, ny)) continue;
+                if (!isOpen(nx, ny)) continue;
                 if (outside[ny][nx]) continue;
 
                 outside[ny][nx] = true;
@@ -401,11 +447,11 @@ public class WaterSystem {
     private void computeReachableFromInlet() {
         reachable = new boolean[mapH][mapW];
 
-        if (level.isWall(inletTx, inletTy) || outside[inletTy][inletTx]) {
+        // nudge inlet inward if invalid
+        if (isSolid(inletTx, inletTy) || outside[inletTy][inletTx]) {
             int[] n = findNearestInterior(inletTx, inletTy);
             inletTx = n[0];
             inletTy = n[1];
-
             inletPxFixed.set(level.tileCenterPx(inletTx, inletTy));
         }
 
@@ -426,7 +472,7 @@ public class WaterSystem {
 
                 if (nx < 0 || nx >= mapW || ny < 0 || ny >= mapH) continue;
                 if (reachable[ny][nx]) continue;
-                if (level.isWall(nx, ny)) continue;
+                if (isSolid(nx, ny)) continue;
 
                 reachable[ny][nx] = true;
                 q.addLast(new int[]{nx, ny});
@@ -439,7 +485,7 @@ public class WaterSystem {
             for (int y = sy - r; y <= sy + r; y++) {
                 for (int x = sx - r; x <= sx + r; x++) {
                     if (x < 0 || x >= mapW || y < 0 || y >= mapH) continue;
-                    if (!level.isWall(x, y) && !outside[y][x]) {
+                    if (!isSolid(x, y) && !outside[y][x]) {
                         return new int[]{x, y};
                     }
                 }
@@ -451,7 +497,7 @@ public class WaterSystem {
     private float computeStreamImpactYPx() {
         int x = inletTx;
         for (int y = inletTy - 1; y >= 0; y--) {
-            if (level.isWall(x, y)) {
+            if (isSolid(x, y)) {
                 float impact = (y + 1) * tileH;
                 return Math.min(impact, inletPxFixed.y - 1f);
             }

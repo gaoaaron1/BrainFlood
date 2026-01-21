@@ -13,15 +13,21 @@ import com.badlogic.gdx.math.Vector2;
 import com.badlogic.gdx.physics.box2d.*;
 import com.badlogic.gdx.utils.viewport.FitViewport;
 import com.badlogic.gdx.utils.viewport.Viewport;
+import com.badlogic.gdx.graphics.g2d.BitmapFont;
+import com.badlogic.gdx.graphics.g2d.SpriteBatch;
 
 import com.boltstorms.brainflood.level.Level;
+import com.boltstorms.brainflood.level.VocabBlockSystem;
 import com.boltstorms.brainflood.level.WallPhysics;
 import com.boltstorms.brainflood.player.BuoyancySystem;
 import com.boltstorms.brainflood.player.PlayerController;
 import com.boltstorms.brainflood.water.WaterSystem;
 
-public class GameScreen implements Screen {
+import java.util.List;
 
+
+public class GameScreen implements Screen {
+    private com.boltstorms.brainflood.level.VocabBlockSystem vocabBlocks;
     private static final String MAP_PATH = "Stages/level_01.tmx";
     private static final float PPM = 32f;
 
@@ -42,7 +48,8 @@ public class GameScreen implements Screen {
 
     private PlayerController playerController;
     private BuoyancySystem buoyancySystem;
-
+    private SpriteBatch batch;
+    private BitmapFont font;
     @Override
     public void show() {
         map = new TmxMapLoader().load(MAP_PATH);
@@ -62,6 +69,21 @@ public class GameScreen implements Screen {
 
         wallPhysics = new WallPhysics(world, PPM);
         wallPhysics.buildAll(level);
+        vocabBlocks = new com.boltstorms.brainflood.level.VocabBlockSystem(level, world, PPM);
+
+// Your vocab pool (can later come from JSON)
+        List<VocabBlockSystem.VocabPair> pool = new java.util.ArrayList<VocabBlockSystem.VocabPair>();
+        pool.add(new VocabBlockSystem.VocabPair("狗", "dog"));
+        pool.add(new VocabBlockSystem.VocabPair("猫", "cat"));
+        pool.add(new VocabBlockSystem.VocabPair("水", "water"));
+        pool.add(new VocabBlockSystem.VocabPair("火", "fire"));
+        pool.add(new VocabBlockSystem.VocabPair("人", "person"));
+        pool.add(new VocabBlockSystem.VocabPair("山", "mountain"));
+
+
+        vocabBlocks.loadAndRandomize(pool, 4);
+        batch = new SpriteBatch();
+        font = new BitmapFont(); // default font, fine for testing
 
         // objects
         Vector2 spawnPx = level.getObjectCenterPx(Level.OBJ_PLAYER_SPAWN);
@@ -73,13 +95,39 @@ public class GameScreen implements Screen {
         int outletTx = level.pxToTileX(outletPx.x);
         int outletTy = level.pxToTileY(outletPx.y);
 
-        waterSystem = new WaterSystem(level, inletTx, inletTy, outletTx, outletTy);
+
+        waterSystem = new WaterSystem(level, inletTx, inletTy, outletTx, outletTy,
+                (tx, ty) -> level.isWall(tx, ty) || vocabBlocks.isSolidTile(tx, ty)
+        );
 
         playerController = new PlayerController();
         buoyancySystem = new BuoyancySystem(level, PPM);
 
         Vector2 spawnM = new Vector2(spawnPx.x / PPM, spawnPx.y / PPM);
         playerController.createPlayer(world, spawnM.x, spawnM.y);
+    }
+    private void handleMouseClick() {
+        if (!Gdx.input.justTouched()) return;
+
+        Vector2 worldPx = viewport.unproject(new Vector2(Gdx.input.getX(), Gdx.input.getY()));
+
+        // 1) try vocab match click first
+        boolean used = vocabBlocks.handleClick(worldPx.x, worldPx.y);
+        if (used) {
+            // if any block broke, water geometry changed
+            waterSystem.onLevelChanged();
+            return;
+        }
+
+        // 2) (optional) still allow breaking real walls
+        int tx = level.pxToTileX(worldPx.x);
+        int ty = level.pxToTileY(worldPx.y);
+
+        if (!level.isWall(tx, ty)) return;
+
+        level.removeWall(tx, ty);
+        wallPhysics.destroyWall(tx, ty);
+        waterSystem.onLevelChanged();
     }
 
     private void handleMouseDestroy() {
@@ -103,6 +151,7 @@ public class GameScreen implements Screen {
         playerController.update(dt);
         waterSystem.update(dt);
         buoyancySystem.apply(playerController.getPlayer(), waterSystem, dt);
+        handleMouseClick();
 
         world.step(1f / 60f, 6, 2);
     }
@@ -125,6 +174,15 @@ public class GameScreen implements Screen {
 
         shapes.setProjectionMatrix(camPx.combined);
         shapes.begin(ShapeRenderer.ShapeType.Filled);
+        for (VocabBlockSystem.VocabBlock b : vocabBlocks.getBlocks()) {
+            if (b.broken) continue;
+
+            if (b.selected) shapes.setColor(1f, 1f, 0f, 0.35f); // selected glow
+            else if (b.side == VocabBlockSystem.Side.HANZI) shapes.setColor(0.2f, 0.2f, 0.2f, 0.75f);
+            else shapes.setColor(0.15f, 0.15f, 0.35f, 0.75f);
+
+            shapes.rect(b.boundsPx.x, b.boundsPx.y, b.boundsPx.width, b.boundsPx.height);
+        }
 
         // Water draws itself (includes inlet stream)
         waterSystem.render(shapes);
@@ -144,7 +202,18 @@ public class GameScreen implements Screen {
         renderLayerIfExists(Level.LAYER_WALL);
         renderLayerIfExists(Level.LAYER_FG);
         renderLayerIfExists(Level.LAYER_FG_DECOR);
+// Text needs SpriteBatch, not ShapeRenderer
+        batch.setProjectionMatrix(camPx.combined);
+        batch.begin();
+        for (VocabBlockSystem.VocabBlock b : vocabBlocks.getBlocks()) {
+            if (b.broken) continue;
 
+            // center-ish text (simple)
+            float tx = b.boundsPx.x + 6f;
+            float ty = b.boundsPx.y + b.boundsPx.height * 0.65f;
+            font.draw(batch, b.text, tx, ty);
+        }
+        batch.end();
         // debug.render(world, camPx.combined);
     }
 
@@ -170,5 +239,8 @@ public class GameScreen implements Screen {
         world.dispose();
         mapRenderer.dispose();
         map.dispose();
+        batch.dispose();
+        font.dispose();
+
     }
 }
