@@ -100,6 +100,9 @@ public class GameScreen implements Screen {
     private static final float BUOYANCY_STRENGTH = 25f;
     private static final float WATER_DRAG = 4f;
 
+    private Body[][] wallBodies; // [y][x] body for each wall tile (or null)
+
+
     @Override
     public void show() {
         map = new TmxMapLoader().load(MAP_PATH);
@@ -126,6 +129,9 @@ public class GameScreen implements Screen {
 
         world = new World(new Vector2(0, -18f), true);
         debug = new Box2DDebugRenderer();
+
+        wallBodies = new Body[mapH][mapW];
+
 
         buildWallColliders(wallLayer);
 
@@ -221,9 +227,47 @@ public class GameScreen implements Screen {
 
                 b.createFixture(fd);
                 shape.dispose();
+
+                wallBodies[y][x] = b; // ✅ store
             }
         }
     }
+    private void handleMouseDestroy() {
+        if (!Gdx.input.justTouched()) return;
+
+        // Mouse screen -> world (pixel) coords
+        float mx = Gdx.input.getX();
+        float my = Gdx.input.getY();
+
+        // Unproject using your pixel camera/viewport
+        Vector2 worldPx = viewport.unproject(new Vector2(mx, my));
+
+        int tx = pxToTileX(worldPx.x);
+        int ty = pxToTileY(worldPx.y);
+
+        if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return;
+
+        // Only destroy if it's currently a wall tile
+        if (!isWall(tx, ty)) return;
+
+        // 1) Remove tile from tiled layer
+        wallLayer.setCell(tx, ty, null);
+
+        // 2) Destroy Box2D body if present
+        Body b = wallBodies[ty][tx];
+        if (b != null) {
+            world.destroyBody(b);
+            wallBodies[ty][tx] = null;
+        }
+
+        // 3) Recompute masks so water/leaks update with new geometry
+        computeOutsideMask();
+        computeReachableFromInlet();
+
+        // 4) If you broke something under the inlet, update stream impact
+        impactYPx = computeStreamImpactYPx();
+    }
+
 
     // ---------- Player ----------
     private void createPlayer(float xM, float yM) {
@@ -541,6 +585,7 @@ public class GameScreen implements Screen {
     private void update(float dt) {
         waterTime += dt;
 
+        handleMouseDestroy();
         handleControls(dt);
         updateWater(dt);
         applyBuoyancy(dt);

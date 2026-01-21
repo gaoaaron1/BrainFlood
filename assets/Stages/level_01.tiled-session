@@ -3,12 +3,20 @@
         "height": 4300,
         "width": 2
     },
-    "activeFile": "",
+    "activeFile": "level_01.tmx",
     "expandedProjectPaths": [
         "."
     ],
     "file.lastUsedOpenFilter": "All Files (*)",
     "fileStates": {
+        "level_01.tmx": {
+            "scale": 0.75,
+            "selectedLayer": 2,
+            "viewCenter": {
+                "x": 213.99999999999994,
+                "y": 659.3333333333334
+            }
+        },
         "mountains3.tsx": {
             "scaleInDock": 1,
             "scaleInEditor": 1
@@ -21,10 +29,13 @@
     "map.tileWidth": 32,
     "map.width": 24,
     "openFiles": [
+        "level_01.tmx",
+        "mountains3.tsx"
     ],
     "project": "level_01.tiled-project",
     "recentFiles": [
-        "mountains3.tsx"
+        "mountains3.tsx",
+        "level_01.tmx"
     ],
     "tileset.lastUsedFormat": "tsx"
 }
