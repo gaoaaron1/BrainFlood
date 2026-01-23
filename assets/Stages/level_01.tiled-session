@@ -10,11 +10,11 @@
     "file.lastUsedOpenFilter": "All Files (*)",
     "fileStates": {
         "level_01.tmx": {
-            "scale": 0.75,
-            "selectedLayer": 2,
+            "scale": 1,
+            "selectedLayer": 3,
             "viewCenter": {
-                "x": 213.99999999999994,
-                "y": 659.3333333333334
+                "x": 165.5,
+                "y": 647.5
             }
         },
         "mountains3.tsx": {

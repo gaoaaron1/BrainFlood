@@ -6,6 +6,8 @@ import com.badlogic.gdx.math.Vector2;
 import com.boltstorms.brainflood.level.Level;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 
 public class WaterSystem {
 
@@ -53,6 +55,13 @@ public class WaterSystem {
     private float impactYPx;
     private boolean waterStarted = false;
 
+    // ---- NEW: surface extraction (for smooth rendering) ----
+    public static class SurfaceRun {
+        public int y;              // tile row of the run
+        public int x0, x1;          // inclusive x range
+        public float[] surfaceYPx;  // per x in [x0..x1]
+    }
+
     public WaterSystem(Level level,
                        int inletTx, int inletTy,
                        int outletTx, int outletTy,
@@ -96,6 +105,14 @@ public class WaterSystem {
         return !isSolid(x, y);
     }
 
+    private boolean canHoldWater(int x, int y) {
+        if (x < 0 || x >= mapW || y < 0 || y >= mapH) return false;
+        if (isSolid(x, y)) return false;
+        if (!reachable[y][x]) return false;
+        if (outside[y][x]) return false;
+        return true;
+    }
+
     // IMPORTANT: if a tile becomes solid (vocab block), remove any stored water there
     private void purgeWaterInSolids() {
         for (int y = 0; y < mapH; y++) {
@@ -121,6 +138,17 @@ public class WaterSystem {
     public boolean isWaterStarted() { return waterStarted; }
 
     public float getWaterTime() { return waterTime; }
+
+    public int mapW() { return mapW; }
+    public int mapH() { return mapH; }
+    public int tileW() { return tileW; }
+    public int tileH() { return tileH; }
+
+    public float getFill(int tx, int ty) {
+        if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return 0f;
+        if (!waterStarted) return 0f;
+        return MathUtils.clamp(water[ty][tx], 0f, 1f);
+    }
 
     public float getLocalSurfacePx(int tx, int ty) {
         if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return 0f;
@@ -149,7 +177,6 @@ public class WaterSystem {
             return;
         }
 
-        // ensure no water is stored in solid tiles (vocab blocks + walls)
         purgeWaterInSolids();
 
         // reset flux
@@ -166,53 +193,14 @@ public class WaterSystem {
         }
 
         drainOutside(dt);
+        cleanupTinyWater();
     }
 
     // -------------------------
-    // Rendering
+    // Rendering helpers (inlet)
     // -------------------------
-    public void render(ShapeRenderer shapes) {
+    public void renderInletOnly(ShapeRenderer shapes) {
         renderInletStream(shapes);
-        if (!waterStarted) return;
-
-        // water body
-        for (int y = 0; y < mapH; y++) {
-            float tileBottom = y * tileH;
-            for (int x = 0; x < mapW; x++) {
-                float w = water[y][x];
-                if (w <= 0f) continue;
-
-                float fillH = w * tileH;
-                shapes.setColor(0.0f, 0.55f, 1.0f, 0.75f);
-                shapes.rect(x * tileW, tileBottom, tileW, fillH);
-            }
-        }
-
-        // surface highlights (skip waterfall tiles)
-        shapes.setColor(0.75f, 0.92f, 1.0f, 0.55f);
-        for (int x = 0; x < mapW; x++) {
-            for (int y = 0; y < mapH; y++) {
-                float w = water[y][x];
-                if (w <= 0.01f) continue;
-
-                if (downFlux[y][x] > surfaceSkipFlux) continue;
-
-                boolean aboveEmpty =
-                        (y == mapH - 1) ||
-                                water[y + 1][x] <= 0.01f ||
-                                isSolid(x, y + 1);
-
-                if (!aboveEmpty) continue;
-
-                float tileBottom = y * tileH;
-                float surfaceY = tileBottom + w * tileH;
-                float wave = MathUtils.sin((x * 0.8f) + waterTime * 3f) * 2.5f;
-
-                shapes.rect(x * tileW, surfaceY - 3f + wave, tileW, 3f);
-            }
-        }
-
-        renderWaterfalls(shapes);
     }
 
     private void renderInletStream(ShapeRenderer shapes) {
@@ -249,57 +237,54 @@ public class WaterSystem {
         }
     }
 
-    private void renderWaterfalls(ShapeRenderer shapes) {
-        for (int x = 0; x < mapW; x++) {
-            int y = 0;
-            while (y < mapH) {
-                while (y < mapH && downFlux[y][x] <= waterfallFluxThreshold) y++;
-                if (y >= mapH) break;
+    // -------------------------
+    // NEW: Surface runs for smooth rendering
+    // -------------------------
+    private boolean isSurfaceTile(int x, int y) {
+        float w = water[y][x];
+        if (w <= 0.01f) return false;
+        if (isSolid(x, y) || !reachable[y][x] || outside[y][x]) return false;
 
-                int startY = y;
-                float maxFlux = downFlux[y][x];
+        // "surface" means top is exposed (either top of map, or above is empty-ish, or above is solid boundary)
+        if (y == mapH - 1) return true;
+        if (isSolid(x, y + 1)) return true;
+        return water[y + 1][x] <= 0.01f;
+    }
 
-                while (y < mapH && downFlux[y][x] > waterfallFluxThreshold) {
-                    maxFlux = Math.max(maxFlux, downFlux[y][x]);
-                    y++;
+    /** Returns all contiguous horizontal surface runs (per row). */
+    public List<SurfaceRun> getSurfaceRunsPx() {
+        ArrayList<SurfaceRun> runs = new ArrayList<>();
+        if (!waterStarted) return runs;
+
+        // For each row, find surface tiles and merge contiguous x into runs.
+        for (int y = 0; y < mapH; y++) {
+            int x = 0;
+            while (x < mapW) {
+                while (x < mapW && !isSurfaceTile(x, y)) x++;
+                if (x >= mapW) break;
+
+                int start = x;
+                int end = x;
+
+                while (end + 1 < mapW && isSurfaceTile(end + 1, y)) end++;
+
+                SurfaceRun r = new SurfaceRun();
+                r.y = y;
+                r.x0 = start;
+                r.x1 = end;
+                r.surfaceYPx = new float[end - start + 1];
+
+                float tileBottom = y * tileH;
+                for (int ix = start; ix <= end; ix++) {
+                    float surf = tileBottom + MathUtils.clamp(water[y][ix], 0f, 1f) * tileH;
+                    r.surfaceYPx[ix - start] = surf;
                 }
-                int endY = y;
 
-                float runBottom = startY * tileH;
-                float runTop = endY * tileH;
-                float runH = runTop - runBottom;
-                if (runH <= 1f) continue;
-
-                float alpha = MathUtils.clamp(0.25f + maxFlux * 1.4f, 0.25f, 0.95f);
-                float baseW = MathUtils.clamp(8f + maxFlux * 20f, 8f, 18f);
-
-                int runSegs = MathUtils.clamp((int) (runH / 16f), 10, 40);
-                float centerX = (x + 0.5f) * tileW;
-
-                for (int i = 0; i < runSegs; i++) {
-                    float a0 = i / (float) runSegs;
-
-                    float y0 = MathUtils.lerp(runTop, runBottom, a0);
-                    float y1 = MathUtils.lerp(runTop, runBottom, (i + 1) / (float) runSegs);
-
-                    float segBottom = Math.min(y0, y1);
-                    float segTop = Math.max(y0, y1);
-
-                    float wob0 = MathUtils.sin(waterTime * 8f + a0 * 6f + x * 0.7f) * 2.5f;
-                    float wob1 = MathUtils.sin(waterTime * 11f + a0 * 9f + x * 0.4f) * 1.6f;
-                    float wob = wob0 * 0.7f + wob1 * 0.3f;
-
-                    float taper = 1f - 0.25f * a0;
-                    float w = baseW * taper;
-
-                    shapes.setColor(0.65f, 0.9f, 1.0f, alpha);
-                    shapes.rect(centerX - w * 0.5f + wob, segBottom, w, segTop - segBottom);
-
-                    shapes.setColor(0.78f, 0.95f, 1.0f, alpha * 0.6f);
-                    shapes.rect(centerX - w * 0.25f + wob * 0.7f, segBottom, w * 0.5f, segTop - segBottom);
-                }
+                runs.add(r);
+                x = end + 1;
             }
         }
+        return runs;
     }
 
     // -------------------------
@@ -324,7 +309,7 @@ public class WaterSystem {
                 float w = water[y][x];
                 if (w <= 0f) continue;
 
-                // down
+                // down (y-1 is down because y=0 is bottom in this project)
                 if (y > 0 && canHoldWater(x, y - 1)) {
                     float space = 1f - water[y - 1][x];
                     if (space > 0f) {
@@ -346,14 +331,6 @@ public class WaterSystem {
                 flowSide(x, y, +1, dt);
             }
         }
-    }
-
-    private boolean canHoldWater(int x, int y) {
-        if (x < 0 || x >= mapW || y < 0 || y >= mapH) return false;
-        if (isSolid(x, y)) return false;
-        if (!reachable[y][x]) return false;
-        if (outside[y][x]) return false;
-        return true;
     }
 
     private void flowSide(int x, int y, int dir, float dt) {
@@ -405,6 +382,35 @@ public class WaterSystem {
                 }
             }
         }
+    }
+
+    private void cleanupTinyWater() {
+        // kill crumbs *only near leaks/outside* so you don't erase legit thin layers
+        final float EPS = 0.06f;
+
+        for (int y = 0; y < mapH; y++) {
+            for (int x = 0; x < mapW; x++) {
+                float w = water[y][x];
+                if (w <= 0f) continue;
+
+                if (w < EPS && isNearOutside(x, y)) {
+                    water[y][x] = 0f;
+                }
+            }
+        }
+    }
+
+    private boolean isNearOutside(int x, int y) {
+        int[] dx = {1, -1, 0, 0};
+        int[] dy = {0, 0, 1, -1};
+
+        for (int i = 0; i < 4; i++) {
+            int nx = x + dx[i];
+            int ny = y + dy[i];
+            if (nx < 0 || nx >= mapW || ny < 0 || ny >= mapH) continue;
+            if (outside != null && outside[ny][nx] && isOpen(nx, ny)) return true;
+        }
+        return false;
     }
 
     // -------------------------
