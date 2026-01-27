@@ -1,12 +1,25 @@
 package com.boltstorms.brainflood.water;
 
-import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.graphics.GL20;
+import com.badlogic.gdx.graphics.Mesh;
+import com.badlogic.gdx.graphics.VertexAttribute;
+import com.badlogic.gdx.graphics.VertexAttributes;
+import com.badlogic.gdx.graphics.glutils.ShaderProgram;
 import com.badlogic.gdx.math.MathUtils;
+import com.badlogic.gdx.math.Matrix4;
 import com.badlogic.gdx.math.Vector2;
 import com.boltstorms.brainflood.level.Level;
+import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
 
 import java.util.ArrayDeque;
 
+/**
+ * Tile-based water simulation + smooth rendering (Marching Squares mesh).
+ *
+ * SIM stays tile-bucket (water[ty][tx] in 0..1).
+ * RENDER becomes smooth via marching squares on a corner scalar field.
+ */
 public class WaterSystem {
 
     public interface SolidQuery {
@@ -20,7 +33,7 @@ public class WaterSystem {
 
     // water state
     private final float[][] water;      // [y][x] 0..1
-    private final float[][] downFlux;   // [y][x] amount moved down this frame (visual)
+    private final float[][] downFlux;   // [y][x] moved down this frame (waterfalls visual)
 
     // masks
     private boolean[][] reachable;
@@ -53,6 +66,25 @@ public class WaterSystem {
     private float impactYPx;
     private boolean waterStarted = false;
 
+    // -------------------------
+    // Smooth water rendering
+    // -------------------------
+    private static final float ISO = 0.02f;  // “water exists” threshold for the mesh
+    private static final int MAX_TRIS_PER_CELL = 4; // safe upper bound
+
+    private Mesh waterMesh;
+    private ShaderProgram waterShader;
+
+    // dynamic CPU buffers
+    private float[] verts;   // x,y,r,g,b,a (6 floats)
+    private short[] indices;
+
+    private int vertCount;   // number of vertices currently in verts (not floats)
+    private int indexCount;  // number of indices currently in indices
+
+    // marching squares scalar field at corners (mapW+1 x mapH+1)
+    private float[] cornerField;
+
     public WaterSystem(Level level,
                        int inletTx, int inletTy,
                        int outletTx, int outletTy,
@@ -83,6 +115,8 @@ public class WaterSystem {
         fallVY = 0f;
         impactYPx = computeStreamImpactYPx();
         waterStarted = false;
+
+        initWaterRenderer();
     }
 
     // -------------------------
@@ -96,7 +130,6 @@ public class WaterSystem {
         return !isSolid(x, y);
     }
 
-    // IMPORTANT: if a tile becomes solid (vocab block), remove any stored water there
     private void purgeWaterInSolids() {
         for (int y = 0; y < mapH; y++) {
             for (int x = 0; x < mapW; x++) {
@@ -119,7 +152,6 @@ public class WaterSystem {
     }
 
     public boolean isWaterStarted() { return waterStarted; }
-
     public float getWaterTime() { return waterTime; }
 
     public float getLocalSurfacePx(int tx, int ty) {
@@ -137,7 +169,7 @@ public class WaterSystem {
     public void update(float dt) {
         waterTime += dt;
 
-        // falling inlet visual
+        // inlet falling visual
         if (!waterStarted) {
             fallVY += fallGravityPx * dt;
             fallYPx += fallVY * dt;
@@ -149,10 +181,8 @@ public class WaterSystem {
             return;
         }
 
-        // ensure no water is stored in solid tiles (vocab blocks + walls)
         purgeWaterInSolids();
 
-        // reset flux
         for (int y = 0; y < mapH; y++) {
             for (int x = 0; x < mapW; x++) {
                 downFlux[y][x] = 0f;
@@ -171,50 +201,310 @@ public class WaterSystem {
     // -------------------------
     // Rendering
     // -------------------------
-    public void render(ShapeRenderer shapes) {
+    /**
+     * Keep your old inlet stream / waterfalls using ShapeRenderer if you want.
+     * Call this DURING your ShapeRenderer pass (before shapes.end()).
+     */
+    public void renderAdditives(ShapeRenderer shapes) {
         renderInletStream(shapes);
         if (!waterStarted) return;
-
-        // water body
-        for (int y = 0; y < mapH; y++) {
-            float tileBottom = y * tileH;
-            for (int x = 0; x < mapW; x++) {
-                float w = water[y][x];
-                if (w <= 0f) continue;
-
-                float fillH = w * tileH;
-                shapes.setColor(0.0f, 0.55f, 1.0f, 0.75f);
-                shapes.rect(x * tileW, tileBottom, tileW, fillH);
-            }
-        }
-
-        // surface highlights (skip waterfall tiles)
-        shapes.setColor(0.75f, 0.92f, 1.0f, 0.55f);
-        for (int x = 0; x < mapW; x++) {
-            for (int y = 0; y < mapH; y++) {
-                float w = water[y][x];
-                if (w <= 0.01f) continue;
-
-                if (downFlux[y][x] > surfaceSkipFlux) continue;
-
-                boolean aboveEmpty =
-                        (y == mapH - 1) ||
-                                water[y + 1][x] <= 0.01f ||
-                                isSolid(x, y + 1);
-
-                if (!aboveEmpty) continue;
-
-                float tileBottom = y * tileH;
-                float surfaceY = tileBottom + w * tileH;
-                float wave = MathUtils.sin((x * 0.8f) + waterTime * 3f) * 2.5f;
-
-                shapes.rect(x * tileW, surfaceY - 3f + wave, tileW, 3f);
-            }
-        }
-
-        renderWaterfalls(shapes);
+        renderWaterfalls(shapes); // same as your old style
     }
 
+    /**
+     * Smooth water body render (mesh).
+     * Call this AFTER shapes.end() (it does its own GL calls).
+     */
+    public void renderWater(Matrix4 proj) {
+        if (!waterStarted) return;
+
+        buildCornerField();
+        buildWaterMesh();
+
+        Gdx.gl.glEnable(GL20.GL_BLEND);
+        Gdx.gl.glBlendFunc(GL20.GL_SRC_ALPHA, GL20.GL_ONE_MINUS_SRC_ALPHA);
+
+        waterShader.bind();
+        waterShader.setUniformMatrix("u_projTrans", proj);
+        waterMesh.render(waterShader, GL20.GL_TRIANGLES);
+    }
+
+    public void dispose() {
+        if (waterMesh != null) waterMesh.dispose();
+        if (waterShader != null) waterShader.dispose();
+    }
+
+    // -------------------------
+    // Smooth water renderer init
+    // -------------------------
+    private void initWaterRenderer() {
+        String vert =
+                "attribute vec2 a_position;\n" +
+                        "attribute vec4 a_color;\n" +
+                        "uniform mat4 u_projTrans;\n" +
+                        "varying vec4 v_col;\n" +
+                        "void main(){\n" +
+                        "  v_col = a_color;\n" +
+                        "  gl_Position = u_projTrans * vec4(a_position, 0.0, 1.0);\n" +
+                        "}\n";
+
+        String frag =
+                "#ifdef GL_ES\nprecision mediump float;\n#endif\n" +
+                        "varying vec4 v_col;\n" +
+                        "void main(){\n" +
+                        "  gl_FragColor = v_col;\n" +
+                        "}\n";
+
+        waterShader = new ShaderProgram(vert, frag);
+        if (!waterShader.isCompiled()) {
+            throw new RuntimeException("Water shader compile error:\n" + waterShader.getLog());
+        }
+
+        // Worst-case triangle count:
+        // Each cell can create up to MAX_TRIS_PER_CELL triangles.
+        int maxTris = mapW * mapH * MAX_TRIS_PER_CELL;
+
+        // Each tri has 3 verts, but we index-share within a polygon; still allocate safely.
+        // We'll allocate as if every tri adds 3 unique verts (safe).
+        int maxVerts = maxTris * 3;
+
+        verts = new float[maxVerts * 6];      // 6 floats per vertex
+        indices = new short[maxTris * 3];     // 3 indices per tri
+
+        waterMesh = new Mesh(true, maxVerts, indices.length,
+                new VertexAttribute(VertexAttributes.Usage.Position, 2, "a_position"),
+                new VertexAttribute(VertexAttributes.Usage.ColorUnpacked, 4, "a_color")
+        );
+
+        cornerField = new float[(mapW + 1) * (mapH + 1)];
+    }
+
+    // -------------------------
+    // Marching Squares field
+    // -------------------------
+    private void buildCornerField() {
+        // Build a scalar at each corner from nearby tile water.
+        // This is what lets the outline become smooth.
+        int w = mapW + 1;
+        int h = mapH + 1;
+
+        for (int cy = 0; cy < h; cy++) {
+            for (int cx = 0; cx < w; cx++) {
+
+                // average the 4 tiles that touch this corner
+                // tiles: (cx-1,cy-1), (cx,cy-1), (cx-1,cy), (cx,cy)
+                float sum = 0f;
+                int count = 0;
+
+                sum += tileWaterSafe(cx - 1, cy - 1); count++;
+                sum += tileWaterSafe(cx,     cy - 1); count++;
+                sum += tileWaterSafe(cx - 1, cy);     count++;
+                sum += tileWaterSafe(cx,     cy);     count++;
+
+                float v = sum / (float)count;
+                cornerField[cy * w + cx] = v;
+            }
+        }
+    }
+
+    private float tileWaterSafe(int tx, int ty) {
+        if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return 0f;
+        if (isSolid(tx, ty)) return 0f;
+        if (!reachable[ty][tx]) return 0f;
+        if (outside[ty][tx]) return 0f;
+        return water[ty][tx];
+    }
+
+    // -------------------------
+    // Marching Squares mesh build
+    // -------------------------
+    private void buildWaterMesh() {
+        vertCount = 0;
+        indexCount = 0;
+
+        int fw = mapW + 1;
+
+        for (int y = 0; y < mapH; y++) {
+            for (int x = 0; x < mapW; x++) {
+
+                // corner values for this cell
+                // corners: 0=bl,1=br,2=tr,3=tl
+                float v0 = cornerField[(y)     * fw + (x)];
+                float v1 = cornerField[(y)     * fw + (x + 1)];
+                float v2 = cornerField[(y + 1) * fw + (x + 1)];
+                float v3 = cornerField[(y + 1) * fw + (x)];
+
+                int c0 = (v0 >= ISO) ? 1 : 0;
+                int c1 = (v1 >= ISO) ? 1 : 0;
+                int c2 = (v2 >= ISO) ? 1 : 0;
+                int c3 = (v3 >= ISO) ? 1 : 0;
+
+                int mask = (c0) | (c1 << 1) | (c2 << 2) | (c3 << 3);
+                if (mask == 0) continue;
+                if (mask == 15) {
+                    // full cell filled: just add a quad (2 tris)
+                    addQuadCell(x, y);
+                    continue;
+                }
+
+                // edge intersection points (in cell-local 0..1)
+                // edges: e0 bottom(0-1), e1 right(1-2), e2 top(2-3), e3 left(3-0)
+                Vector2 e0 = edgePoint(0, v0, v1);
+                Vector2 e1 = edgePoint(1, v1, v2);
+                Vector2 e2 = edgePoint(2, v2, v3);
+                Vector2 e3 = edgePoint(3, v3, v0);
+
+                // Ambiguous cases (5 and 10): choose connection based on center value
+                if (mask == 5 || mask == 10) {
+                    float center = (v0 + v1 + v2 + v3) * 0.25f;
+                    boolean centerIn = center >= ISO;
+
+                    if (!centerIn) {
+                        // two separate triangles islands
+                        if (mask == 5) {
+                            // bl and tr
+                            addPoly(x, y, new Vector2[]{ corner(0), e0, e3 });
+                            addPoly(x, y, new Vector2[]{ corner(2), e2, e1 });
+                        } else {
+                            // br and tl
+                            addPoly(x, y, new Vector2[]{ corner(1), e1, e0 });
+                            addPoly(x, y, new Vector2[]{ corner(3), e3, e2 });
+                        }
+                    } else {
+                        // connect through center => diamond
+                        addPoly(x, y, new Vector2[]{ e0, e1, e2, e3 });
+                    }
+                    continue;
+                }
+
+                // Standard polygon per case (filled region inside)
+                switch (mask) {
+                    case 1:  addPoly(x,y, new Vector2[]{ corner(0), e0, e3 }); break;
+                    case 2:  addPoly(x,y, new Vector2[]{ corner(1), e1, e0 }); break;
+                    case 3:  addPoly(x,y, new Vector2[]{ corner(0), corner(1), e1, e3 }); break;
+                    case 4:  addPoly(x,y, new Vector2[]{ corner(2), e2, e1 }); break;
+                    case 6:  addPoly(x,y, new Vector2[]{ corner(1), corner(2), e2, e0 }); break;
+                    case 7:  addPoly(x,y, new Vector2[]{ corner(0), corner(1), corner(2), e2, e3 }); break;
+                    case 8:  addPoly(x,y, new Vector2[]{ corner(3), e3, e2 }); break;
+                    case 9:  addPoly(x,y, new Vector2[]{ corner(0), e0, e2, corner(3) }); break;
+                    case 11: addPoly(x,y, new Vector2[]{ corner(0), corner(1), e1, e2, corner(3) }); break;
+                    case 12: addPoly(x,y, new Vector2[]{ e3, corner(3), corner(2), e1 }); break;
+                    case 13: addPoly(x,y, new Vector2[]{ e0, corner(0), corner(3), corner(2), e1 }); break;
+                    case 14: addPoly(x,y, new Vector2[]{ e3, e0, corner(1), corner(2), corner(3) }); break;
+                    default:
+                        // should not happen
+                        break;
+                }
+            }
+        }
+
+        // upload to GPU
+        waterMesh.setVertices(verts, 0, vertCount * 6);
+        waterMesh.setIndices(indices, 0, indexCount);
+    }
+
+    // local corner positions in a cell (0..1)
+    private Vector2 corner(int idx) {
+        switch (idx) {
+            case 0: return new Vector2(0f, 0f); // bl
+            case 1: return new Vector2(1f, 0f); // br
+            case 2: return new Vector2(1f, 1f); // tr
+            case 3: return new Vector2(0f, 1f); // tl
+            default: return new Vector2(0f, 0f);
+        }
+    }
+
+    // edge intersection (cell-local coords)
+    private Vector2 edgePoint(int edge, float a, float b) {
+        float t;
+        float d = (b - a);
+        if (Math.abs(d) < 1e-6f) t = 0.5f;
+        else t = (ISO - a) / d;
+        t = MathUtils.clamp(t, 0f, 1f);
+
+        switch (edge) {
+            case 0: return new Vector2(t, 0f);       // bottom
+            case 1: return new Vector2(1f, t);       // right
+            case 2: return new Vector2(1f - t, 1f);  // top
+            case 3: return new Vector2(0f, 1f - t);  // left
+            default: return new Vector2(0f, 0f);
+        }
+    }
+
+    private void addQuadCell(int tx, int ty) {
+        // add quad as 2 triangles in world px
+        Vector2 p0 = toWorld(tx, ty, 0f, 0f);
+        Vector2 p1 = toWorld(tx, ty, 1f, 0f);
+        Vector2 p2 = toWorld(tx, ty, 1f, 1f);
+        Vector2 p3 = toWorld(tx, ty, 0f, 1f);
+
+        short i0 = addVertex(p0.x, p0.y);
+        short i1 = addVertex(p1.x, p1.y);
+        short i2 = addVertex(p2.x, p2.y);
+        short i3 = addVertex(p3.x, p3.y);
+
+        addTri(i0, i1, i2);
+        addTri(i0, i2, i3);
+    }
+
+    private void addPoly(int cellX, int cellY, Vector2[] polyLocal) {
+        if (polyLocal.length < 3) return;
+
+        // Convert to world points
+        // Triangulate fan around vertex 0
+        short base = addVertex(toWorld(cellX, cellY, polyLocal[0].x, polyLocal[0].y));
+
+        for (int i = 1; i < polyLocal.length - 1; i++) {
+            short i1 = addVertex(toWorld(cellX, cellY, polyLocal[i].x, polyLocal[i].y));
+            short i2 = addVertex(toWorld(cellX, cellY, polyLocal[i + 1].x, polyLocal[i + 1].y));
+            addTri(base, i1, i2);
+        }
+    }
+
+    private Vector2 toWorld(int cellX, int cellY, float lx, float ly) {
+        return new Vector2((cellX + lx) * tileW, (cellY + ly) * tileH);
+    }
+
+    private short addVertex(Vector2 p) {
+        return addVertex(p.x, p.y);
+    }
+
+    private short addVertex(float x, float y) {
+        // position + vertex color (cheap “real water” gradient + shimmer)
+        // deeper (low y) darker, near top lighter
+        float t = MathUtils.clamp(y / (mapH * (float)tileH), 0f, 1f);
+
+        // subtle animated shimmer (no tiles!)
+        float shimmer = MathUtils.sin((x * 0.012f) + waterTime * 1.4f) * 0.04f
+                + MathUtils.sin((y * 0.010f) + waterTime * 1.1f) * 0.03f;
+
+        float r = MathUtils.lerp(0.04f, 0.20f, t) + shimmer;
+        float g = MathUtils.lerp(0.28f, 0.70f, t) + shimmer;
+        float b = MathUtils.lerp(0.78f, 1.00f, t) + shimmer;
+        float a = MathUtils.lerp(0.70f, 0.88f, t);
+
+        int base = vertCount * 6;
+        verts[base]     = x;
+        verts[base + 1] = y;
+        verts[base + 2] = r;
+        verts[base + 3] = g;
+        verts[base + 4] = b;
+        verts[base + 5] = a;
+
+        short idx = (short) vertCount;
+        vertCount++;
+        return idx;
+    }
+
+    private void addTri(short a, short b, short c) {
+        indices[indexCount++] = a;
+        indices[indexCount++] = b;
+        indices[indexCount++] = c;
+    }
+
+    // -------------------------
+    // Waterfalls + inlet stream (your existing style)
+    // -------------------------
     private void renderInletStream(ShapeRenderer shapes) {
         float sx = inletPxFixed.x;
         float syTop = inletPxFixed.y;
@@ -241,10 +531,10 @@ public class WaterSystem {
             float segBottom = Math.min(y0, y1);
             float segTop = Math.max(y0, y1);
 
-            shapes.setColor(0.65f, 0.9f, 1.0f, 0.9f);
+            shapes.setColor(0.65f, 0.9f, 1.0f, 0.85f);
             shapes.rect(sx - ribbonW * 0.5f + wob0, segBottom, ribbonW, segTop - segBottom);
 
-            shapes.setColor(0.78f, 0.95f, 1.0f, 0.55f);
+            shapes.setColor(0.78f, 0.95f, 1.0f, 0.45f);
             shapes.rect(sx - ribbonW * 0.25f + wob1, segBottom, ribbonW * 0.5f, segTop - segBottom);
         }
     }
@@ -270,33 +560,32 @@ public class WaterSystem {
                 float runH = runTop - runBottom;
                 if (runH <= 1f) continue;
 
-                float alpha = MathUtils.clamp(0.25f + maxFlux * 1.4f, 0.25f, 0.95f);
-                float baseW = MathUtils.clamp(8f + maxFlux * 20f, 8f, 18f);
+                float alpha = MathUtils.clamp(0.18f + maxFlux * 1.2f, 0.18f, 0.85f);
+                float baseW = MathUtils.clamp(7f + maxFlux * 18f, 7f, 16f);
 
-                int runSegs = MathUtils.clamp((int) (runH / 16f), 10, 40);
+                int segs = MathUtils.clamp((int) (runH / 28f), 6, 18);
                 float centerX = (x + 0.5f) * tileW;
 
-                for (int i = 0; i < runSegs; i++) {
-                    float a0 = i / (float) runSegs;
+                for (int i = 0; i < segs; i++) {
+                    float a0 = i / (float) segs;
 
                     float y0 = MathUtils.lerp(runTop, runBottom, a0);
-                    float y1 = MathUtils.lerp(runTop, runBottom, (i + 1) / (float) runSegs);
+                    float y1 = MathUtils.lerp(runTop, runBottom, (i + 1) / (float) segs);
 
                     float segBottom = Math.min(y0, y1);
                     float segTop = Math.max(y0, y1);
 
-                    float wob0 = MathUtils.sin(waterTime * 8f + a0 * 6f + x * 0.7f) * 2.5f;
-                    float wob1 = MathUtils.sin(waterTime * 11f + a0 * 9f + x * 0.4f) * 1.6f;
-                    float wob = wob0 * 0.7f + wob1 * 0.3f;
+                    float drift = MathUtils.sin(waterTime * 2.0f + segBottom * 0.02f + x * 0.6f) * 2.5f;
 
-                    float taper = 1f - 0.25f * a0;
+                    float taper = 1f - 0.18f * a0;
                     float w = baseW * taper;
+                    float cx = centerX + drift;
 
                     shapes.setColor(0.65f, 0.9f, 1.0f, alpha);
-                    shapes.rect(centerX - w * 0.5f + wob, segBottom, w, segTop - segBottom);
+                    shapes.rect(cx - w * 0.5f, segBottom, w, segTop - segBottom);
 
-                    shapes.setColor(0.78f, 0.95f, 1.0f, alpha * 0.6f);
-                    shapes.rect(centerX - w * 0.25f + wob * 0.7f, segBottom, w * 0.5f, segTop - segBottom);
+                    shapes.setColor(0.82f, 0.96f, 1.0f, alpha * 0.35f);
+                    shapes.rect(cx - w * 0.18f, segBottom, w * 0.36f, segTop - segBottom);
                 }
             }
         }

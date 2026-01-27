@@ -192,8 +192,10 @@ public class GameScreen implements Screen {
             shapes.rect(b.boundsPx.x, b.boundsPx.y, b.boundsPx.width, b.boundsPx.height);
         }
 
-        // Water draws itself (includes inlet stream)
-        waterSystem.render(shapes);
+        waterSystem.renderAdditives(shapes);
+
+
+
 
         // Player
         if (playerController.getPlayer() != null) {
@@ -206,6 +208,7 @@ public class GameScreen implements Screen {
         }
 
         shapes.end();
+        waterSystem.renderWater(camPx.combined);
 
         renderLayerIfExists(Level.LAYER_WALL);
         renderLayerIfExists(Level.LAYER_FG);
@@ -250,5 +253,7 @@ public class GameScreen implements Screen {
         batch.dispose();
         font.dispose();
         if (fontGen != null) fontGen.dispose();
+        if (waterSystem != null) waterSystem.dispose();
+
     }
 }
