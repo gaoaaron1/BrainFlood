@@ -69,7 +69,7 @@ public class WaterSystem {
     // -------------------------
     // Smooth water rendering
     // -------------------------
-    private static final float ISO = 0.02f;  // “water exists” threshold for the mesh
+    private static final float ISO = 0.06f;  // “water exists” threshold for the mesh
     private static final int MAX_TRIS_PER_CELL = 4; // safe upper bound
 
     private Mesh waterMesh;
@@ -283,37 +283,55 @@ public class WaterSystem {
     // Marching Squares field
     // -------------------------
     private void buildCornerField() {
-        // Build a scalar at each corner from nearby tile water.
-        // This is what lets the outline become smooth.
+        // Corner scalar field, but computed in a way that DOESN'T “smear” through solids.
+        // We weight the 4 touching tiles by closeness and ignore invalid tiles entirely.
+
         int w = mapW + 1;
         int h = mapH + 1;
 
         for (int cy = 0; cy < h; cy++) {
             for (int cx = 0; cx < w; cx++) {
 
-                // average the 4 tiles that touch this corner
-                // tiles: (cx-1,cy-1), (cx,cy-1), (cx-1,cy), (cx,cy)
+                // Touching tiles around the corner:
+                // (cx-1,cy-1) bottom-left, (cx,cy-1) bottom-right
+                // (cx-1,cy)   top-left,    (cx,cy)   top-right
+                float vBL = tileWaterSafe(cx - 1, cy - 1);
+                float vBR = tileWaterSafe(cx,     cy - 1);
+                float vTL = tileWaterSafe(cx - 1, cy);
+                float vTR = tileWaterSafe(cx,     cy);
+
+                // weights (closer tiles count a bit more)
+                // if a tile is invalid, treat it as "not contributing"
                 float sum = 0f;
-                int count = 0;
+                float wsum = 0f;
 
-                sum += tileWaterSafe(cx - 1, cy - 1); count++;
-                sum += tileWaterSafe(cx,     cy - 1); count++;
-                sum += tileWaterSafe(cx - 1, cy);     count++;
-                sum += tileWaterSafe(cx,     cy);     count++;
+                if (vBL >= 0f) { sum += vBL * 1.0f; wsum += 1.0f; }
+                if (vBR >= 0f) { sum += vBR * 1.0f; wsum += 1.0f; }
+                if (vTL >= 0f) { sum += vTL * 1.0f; wsum += 1.0f; }
+                if (vTR >= 0f) { sum += vTR * 1.0f; wsum += 1.0f; }
 
-                float v = sum / (float)count;
+                float v;
+                if (wsum <= 0f) v = 0f;
+                else v = sum / wsum;
+
                 cornerField[cy * w + cx] = v;
             }
         }
     }
 
+    /**
+     * Returns:
+     *  - water amount 0..1 if this tile is valid water space
+     *  - -1 if it should NOT contribute to the corner field (solid/outside/unreachable)
+     */
     private float tileWaterSafe(int tx, int ty) {
-        if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return 0f;
-        if (isSolid(tx, ty)) return 0f;
-        if (!reachable[ty][tx]) return 0f;
-        if (outside[ty][tx]) return 0f;
+        if (tx < 0 || tx >= mapW || ty < 0 || ty >= mapH) return -1f;
+        if (isSolid(tx, ty)) return -1f;
+        if (!reachable[ty][tx]) return -1f;
+        if (outside[ty][tx]) return -1f;
         return water[ty][tx];
     }
+
 
     // -------------------------
     // Marching Squares mesh build
@@ -355,27 +373,40 @@ public class WaterSystem {
                 Vector2 e3 = edgePoint(3, v3, v0);
 
                 // Ambiguous cases (5 and 10): choose connection based on center value
+// Ambiguous cases (5 and 10): use a stable decider (asymptotic-style)
+// This prevents popping/glitches as values hover near ISO.
                 if (mask == 5 || mask == 10) {
-                    float center = (v0 + v1 + v2 + v3) * 0.25f;
-                    boolean centerIn = center >= ISO;
 
-                    if (!centerIn) {
-                        // two separate triangles islands
-                        if (mask == 5) {
-                            // bl and tr
+                    // Decider: compare products around ISO (more stable than averaging)
+                    // If (v0-ISO)*(v2-ISO) > (v1-ISO)*(v3-ISO), connect one way, else the other.
+                    float a = (v0 - ISO) * (v2 - ISO);
+                    float b = (v1 - ISO) * (v3 - ISO);
+
+                    boolean connectDiagonal02 = (a > b);
+
+                    if (mask == 5) {
+                        // corners inside: 0 and 2
+                        if (connectDiagonal02) {
+                            // connect 0-2 through center (diamond-ish)
+                            addPoly(x, y, new Vector2[]{ e0, e1, e2, e3 });
+                        } else {
+                            // two separate triangles
                             addPoly(x, y, new Vector2[]{ corner(0), e0, e3 });
                             addPoly(x, y, new Vector2[]{ corner(2), e2, e1 });
+                        }
+                    } else { // mask == 10 (corners inside: 1 and 3)
+                        if (!connectDiagonal02) {
+                            // connect 1-3 through center
+                            addPoly(x, y, new Vector2[]{ e0, e1, e2, e3 });
                         } else {
-                            // br and tl
+                            // two separate triangles
                             addPoly(x, y, new Vector2[]{ corner(1), e1, e0 });
                             addPoly(x, y, new Vector2[]{ corner(3), e3, e2 });
                         }
-                    } else {
-                        // connect through center => diamond
-                        addPoly(x, y, new Vector2[]{ e0, e1, e2, e3 });
                     }
                     continue;
                 }
+
 
                 // Standard polygon per case (filled region inside)
                 switch (mask) {
